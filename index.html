@@ -378,7 +378,10 @@
                         
                         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
                             setLoading(false);
-                            if (videoRef.current) videoRef.current.play().catch(e => console.warn('Playback prevented:', e));
+                            if (videoRef.current) {
+                                const p = videoRef.current.play();
+                                if (p !== undefined) p.catch(e => { if (e.name !== 'AbortError') console.warn('Playback prevented:', e); });
+                            }
                         });
 
                         hls.on(window.Hls.Events.LEVEL_SWITCHED, (event, data) => {
@@ -394,7 +397,10 @@
                         videoRef.current.src = channel.url;
                         videoRef.current.addEventListener('loadedmetadata', () => {
                             setLoading(false);
-                            if (videoRef.current) videoRef.current.play().catch(e => console.warn('Playback prevented:', e));
+                            if (videoRef.current) {
+                                const p = videoRef.current.play();
+                                if (p !== undefined) p.catch(e => { if (e.name !== 'AbortError') console.warn('Playback prevented:', e); });
+                            }
                         });
                         videoRef.current.addEventListener('resize', () => {
                             setStats({ res: `${videoRef.current.videoHeight}p`, fps: '' });
@@ -412,7 +418,8 @@
                         onBack();
                     } else if (e.key === ' ' || e.key === 'Enter') {
                         if (videoRef.current && videoRef.current.paused) {
-                            videoRef.current.play().catch(err => console.warn('Playback error:', err));
+                            const p = videoRef.current.play();
+                            if (p !== undefined) p.catch(err => { if (err.name !== 'AbortError') console.warn('Playback error:', err); });
                         } else if (videoRef.current) {
                             videoRef.current.pause();
                         }
@@ -484,7 +491,7 @@
             const [loading, setLoading] = useState(true);
             const [controlsVisible, setControlsVisible] = useState(true);
             const [osdMessage, setOsdMessage] = useState('');
-            const [osdTimeout, setOsdTimeout] = useState(null);
+            const osdTimerRef = useRef(null);
             const [stats, setStats] = useState({ res: '', fps: '' });
             
             // Playback State
@@ -523,12 +530,12 @@
                 };
             }, [isPlaying]);
 
-            // Show OSD Message
+            // Show OSD Message (Refactored to avoid re-render loops in dependencies)
             const showOSD = useCallback((text) => {
                 setOsdMessage(text);
-                if (osdTimeout) clearTimeout(osdTimeout);
-                setOsdTimeout(setTimeout(() => setOsdMessage(''), 2000));
-            }, [osdTimeout]);
+                if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
+                osdTimerRef.current = setTimeout(() => setOsdMessage(''), 2000);
+            }, []);
 
             // Load Video and Subtitles
             useEffect(() => {
@@ -553,14 +560,48 @@
                     setSubtitleUrl(null);
                 }
 
-                // Explicitly removed the `.load()` method call to prevent interrupting 
-                // Chromium's asynchronous internal demuxer initialization for complex containers like MKV.
                 videoRef.current.src = channel.url;
-                videoRef.current.play().catch(e => {
-                    console.warn('Autoplay prevented or unsupported media', e);
-                    setLoading(false);
-                });
-            }, [channel, showOSD]);
+                const p = videoRef.current.play();
+                if (p !== undefined) {
+                    p.catch(e => {
+                        if (e.name !== 'AbortError') console.warn('Autoplay prevented or unsupported media', e);
+                        setLoading(false);
+                    });
+                }
+            }, [channel, showOSD]); 
+
+            // Controls Handlers
+            const togglePlay = () => { 
+                if (videoRef.current.paused) {
+                    const p = videoRef.current.play();
+                    if (p !== undefined) p.catch(e => { if (e.name !== 'AbortError') console.warn(e); });
+                } else {
+                    videoRef.current.pause(); 
+                }
+            };
+            const toggleFullscreen = () => {
+                if (!document.fullscreenElement) containerRef.current.requestFullscreen().catch(err => console.log(err));
+                else document.exitFullscreen();
+            };
+            const toggleMute = () => {
+                videoRef.current.muted = !videoRef.current.muted;
+                setIsMuted(videoRef.current.muted);
+                showOSD(videoRef.current.muted ? 'Muted' : 'Unmuted');
+            };
+            const changeVolume = (delta) => {
+                const newVol = Math.max(0, Math.min(1, videoRef.current.volume + delta));
+                videoRef.current.volume = newVol;
+                videoRef.current.muted = false;
+                setVolume(newVol);
+                setIsMuted(false);
+                showOSD(`Volume: ${Math.round(newVol * 100)}%`);
+            };
+            const changeSpeed = (delta) => {
+                const newSpeed = Math.max(0.25, Math.min(4.0, videoRef.current.playbackRate + delta));
+                videoRef.current.playbackRate = newSpeed;
+                setPlaybackRate(newSpeed);
+                showOSD(`Speed: ${newSpeed}x`);
+            };
 
             // --- LUME KEYBOARD ENGINE & SUBTITLE NAVIGATION ---
             useEffect(() => {
@@ -624,14 +665,20 @@
                     if (e.altKey) {
                         if (e.key === '=' || e.key === '+') {
                             e.preventDefault();
-                            setCustomZoom(prev => (prev === null ? 1 : prev) + 0.1);
-                            showOSD(`Zoom: ${Math.round(((customZoom || 1) + 0.1) * 100)}%`);
+                            setCustomZoom(prev => {
+                                const newZoom = (prev === null ? 1 : prev) + 0.1;
+                                showOSD(`Zoom: ${Math.round(newZoom * 100)}%`);
+                                return newZoom;
+                            });
                             return;
                         }
                         if (e.key === '-') {
                             e.preventDefault();
-                            setCustomZoom(prev => Math.max(0.1, (prev === null ? 1 : prev) - 0.1));
-                            showOSD(`Zoom: ${Math.round(Math.max(0.1, ((customZoom || 1) - 0.1)) * 100)}%`);
+                            setCustomZoom(prev => {
+                                const newZoom = Math.max(0.1, (prev === null ? 1 : prev) - 0.1);
+                                showOSD(`Zoom: ${Math.round(newZoom * 100)}%`);
+                                return newZoom;
+                            });
                             return;
                         }
                     }
@@ -639,7 +686,7 @@
                     switch(e.key.toLowerCase()) {
                         case ' ':
                             e.preventDefault();
-                            if (video.paused) video.play(); else video.pause();
+                            togglePlay();
                             break;
                         case 'f':
                             e.preventDefault();
@@ -709,7 +756,7 @@
 
                 window.addEventListener('keydown', handleKey);
                 return () => window.removeEventListener('keydown', handleKey);
-            }, [onBack, customZoom, showOSD]); 
+            }, [onBack, showOSD]); // showOSD is now stable, customZoom removed as a direct dependency using functional updates
 
             // Video Event Listeners
             useEffect(() => {
@@ -786,32 +833,6 @@
                 };
             }, [showOSD]);
 
-            // Controls Handlers
-            const togglePlay = () => { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); };
-            const toggleFullscreen = () => {
-                if (!document.fullscreenElement) containerRef.current.requestFullscreen().catch(err => console.log(err));
-                else document.exitFullscreen();
-            };
-            const toggleMute = () => {
-                videoRef.current.muted = !videoRef.current.muted;
-                setIsMuted(videoRef.current.muted);
-                showOSD(videoRef.current.muted ? 'Muted' : 'Unmuted');
-            };
-            const changeVolume = (delta) => {
-                const newVol = Math.max(0, Math.min(1, videoRef.current.volume + delta));
-                videoRef.current.volume = newVol;
-                videoRef.current.muted = false;
-                setVolume(newVol);
-                setIsMuted(false);
-                showOSD(`Volume: ${Math.round(newVol * 100)}%`);
-            };
-            const changeSpeed = (delta) => {
-                const newSpeed = Math.max(0.25, Math.min(4.0, videoRef.current.playbackRate + delta));
-                videoRef.current.playbackRate = newSpeed;
-                setPlaybackRate(newSpeed);
-                showOSD(`Speed: ${newSpeed}x`);
-            };
-
             const handleSubtitleUpload = (e) => {
                 const file = e.target.files[0];
                 if (!file || !videoRef.current) return;
@@ -883,7 +904,7 @@
                     <div className="flex-1 w-full h-full flex items-center justify-center overflow-hidden">
                         <div style={cropStyle}>
                             <div style={arStyle}>
-                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} preload="auto" playsInline onClick={togglePlay}>
+                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} preload="auto" playsInline autoPlay onClick={togglePlay}>
                                     {subtitleUrl && <track kind="subtitles" label="Local Subs" src={subtitleUrl} default />}
                                 </video>
                             </div>
