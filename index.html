@@ -485,6 +485,7 @@
             const [controlsVisible, setControlsVisible] = useState(true);
             const [osdMessage, setOsdMessage] = useState('');
             const [osdTimeout, setOsdTimeout] = useState(null);
+            const [stats, setStats] = useState({ res: '', fps: '' });
             
             // Playback State
             const [isPlaying, setIsPlaying] = useState(true);
@@ -521,11 +522,12 @@
                 };
             }, [isPlaying]);
 
-            // Load Video
+            // Load Video properly with MKV support consideration (.load())
             useEffect(() => {
                 if (!videoRef.current) return;
                 setLoading(true);
                 videoRef.current.src = channel.url;
+                videoRef.current.load(); // Required reset to handle MKV local files correctly across react renders
                 videoRef.current.play().catch(e => {
                     console.warn('Autoplay prevented or unsupported media', e);
                     setLoading(false);
@@ -539,8 +541,52 @@
                 setOsdTimeout(setTimeout(() => setOsdMessage(''), 2000));
             }, [osdTimeout]);
 
-            // --- LUME KEYBOARD ENGINE ---
+            // --- LUME KEYBOARD ENGINE & SUBTITLE NAVIGATION ---
             useEffect(() => {
+                const doNavigateSubtitles = (direction) => {
+                    const video = videoRef.current;
+                    if (!video) return;
+                    const tracks = video.textTracks;
+                    if (!tracks || tracks.length === 0) return;
+
+                    let track = null;
+                    for (let i = 0; i < tracks.length; i++) {
+                        if (tracks[i].mode === 'hidden' || tracks[i].mode === 'showing') {
+                            track = tracks[i];
+                            break;
+                        }
+                    }
+
+                    if (!track || !track.cues || track.cues.length === 0) {
+                        showOSD("No Subtitles Loaded");
+                        return;
+                    }
+
+                    const currentT = video.currentTime;
+                    let targetTime = -1;
+
+                    if (direction === 'next') {
+                        for (let i = 0; i < track.cues.length; i++) {
+                            if (track.cues[i].startTime > currentT + 0.1) {
+                                targetTime = track.cues[i].startTime;
+                                break;
+                            }
+                        }
+                    } else if (direction === 'prev') {
+                        for (let i = track.cues.length - 1; i >= 0; i--) {
+                            if (track.cues[i].startTime < currentT - 0.5) {
+                                targetTime = track.cues[i].startTime;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (targetTime !== -1) {
+                        video.currentTime = targetTime;
+                        showOSD(direction === 'next' ? 'Next Subtitle' : 'Prev Subtitle');
+                    }
+                };
+
                 const handleKey = (e) => {
                     if (e.target.tagName.toLowerCase() === 'input' && e.target.type !== 'range') return;
                     
@@ -621,12 +667,12 @@
                             break;
                         case 'arrowright':
                             e.preventDefault();
-                            if (e.ctrlKey) navigateSubtitles('next');
+                            if (e.ctrlKey) doNavigateSubtitles('next');
                             else { video.currentTime = Math.min(video.currentTime + 10, video.duration); showOSD('+10s'); }
                             break;
                         case 'arrowleft':
                             e.preventDefault();
-                            if (e.ctrlKey) navigateSubtitles('prev');
+                            if (e.ctrlKey) doNavigateSubtitles('prev');
                             else { video.currentTime = Math.max(video.currentTime - 10, 0); showOSD('-10s'); }
                             break;
                         case 'arrowup':
@@ -642,7 +688,7 @@
 
                 window.addEventListener('keydown', handleKey);
                 return () => window.removeEventListener('keydown', handleKey);
-            }, [onBack, customZoom, osdTimeout]); 
+            }, [onBack, customZoom, showOSD]); 
 
             // Video Event Listeners
             useEffect(() => {
@@ -674,8 +720,15 @@
                     setCurrentSubtitleText(newText);
                 };
 
+                const updateStats = () => {
+                    if (videoRef.current && videoRef.current.videoHeight) {
+                        setStats({ res: `${videoRef.current.videoHeight}p`, fps: '' }); // FPS natively unsupported easily
+                    }
+                };
+
                 const onLoadedMetadata = () => {
                     setDuration(video.duration);
+                    updateStats();
                     setLoading(false); // Dismiss loading as soon as metadata is parsed
                 };
 
@@ -697,6 +750,7 @@
                 video.addEventListener('canplay', onCanPlay);
                 video.addEventListener('playing', onPlaying);
                 video.addEventListener('pause', onPause);
+                video.addEventListener('resize', updateStats);
 
                 return () => {
                     video.removeEventListener('timeupdate', onTimeUpdate);
@@ -704,6 +758,7 @@
                     video.removeEventListener('canplay', onCanPlay);
                     video.removeEventListener('playing', onPlaying);
                     video.removeEventListener('pause', onPause);
+                    video.removeEventListener('resize', updateStats);
                 };
             }, [showOSD]);
 
@@ -832,12 +887,20 @@
                         {osdMessage}
                     </div>
 
-                    {/* Netflix-Style OSD Top Bar with Title */}
-                    <div className={`absolute top-0 left-0 w-full px-8 py-6 bg-gradient-to-b from-black/90 to-transparent flex items-center transition-opacity duration-500 z-50 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
-                        <button onClick={onBack} className="text-white hover:scale-110 transition-transform p-2 mr-6">
-                            <span className="w-8 h-8 block">{ICONS.arrowLeft}</span>
-                        </button>
-                        <h2 className="text-3xl font-light text-white tracking-tight drop-shadow-md truncate">{channel.name}</h2>
+                    {/* Netflix-Style OSD Top Bar with Title and Stats */}
+                    <div className={`absolute top-0 left-0 w-full px-8 py-6 bg-gradient-to-b from-black/90 to-transparent flex items-start justify-between transition-opacity duration-500 z-50 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
+                        <div className="flex items-center">
+                            <button onClick={onBack} className="text-white hover:scale-110 transition-transform p-2 mr-6">
+                                <span className="w-8 h-8 block">{ICONS.arrowLeft}</span>
+                            </button>
+                            <h2 className="text-3xl font-light text-white tracking-tight drop-shadow-md truncate max-w-4xl">{channel.name}</h2>
+                        </div>
+                        {stats.res && (
+                            <div className="flex items-center space-x-3 text-white/90 bg-white/10 px-4 py-2.5 rounded-xl border border-white/10 font-bold tracking-wider">
+                                <span>{stats.res}</span>
+                                {stats.fps && <span className="font-light opacity-70">| {stats.fps}</span>}
+                            </div>
+                        )}
                     </div>
 
                     {/* Netflix-Style OSD Bottom Bar */}
@@ -928,9 +991,10 @@
             const folderInputRef = useRef(null);
 
             const handleLocalFilesChange = (e) => {
-                const files = Array.from(e.target.files).filter(f => 
-                    f.type.startsWith('video/') || f.name.endsWith('.mkv') || f.name.endsWith('.mp4') || f.name.endsWith('.webm')
-                );
+                const files = Array.from(e.target.files).filter(f => {
+                    const nameLower = f.name.toLowerCase();
+                    return f.type.startsWith('video/') || nameLower.endsWith('.mkv') || nameLower.endsWith('.mp4') || nameLower.endsWith('.webm');
+                });
                 
                 if (files.length === 0) return;
 
