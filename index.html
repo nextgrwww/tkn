@@ -495,8 +495,9 @@
             const [isMuted, setIsMuted] = useState(false);
             const [playbackRate, setPlaybackRate] = useState(1);
             
-            // Custom Subtitle State
+            // Custom Subtitle State tracked via React (prevents vDOM reconciliation destruction)
             const [currentSubtitleText, setCurrentSubtitleText] = useState('');
+            const [subtitleUrl, setSubtitleUrl] = useState(null);
 
             // Lume Video Transform States
             const aspectRatios = ['Default', '16:9', '4:3', '1:1', '16:10', '2.21:1', '2.35:1', '2.39:1', '5:4'];
@@ -522,24 +523,44 @@
                 };
             }, [isPlaying]);
 
-            // Load Video properly with MKV support consideration (.load())
-            useEffect(() => {
-                if (!videoRef.current) return;
-                setLoading(true);
-                videoRef.current.src = channel.url;
-                videoRef.current.load(); // Required reset to handle MKV local files correctly across react renders
-                videoRef.current.play().catch(e => {
-                    console.warn('Autoplay prevented or unsupported media', e);
-                    setLoading(false);
-                });
-            }, [channel]);
-
             // Show OSD Message
             const showOSD = useCallback((text) => {
                 setOsdMessage(text);
                 if (osdTimeout) clearTimeout(osdTimeout);
                 setOsdTimeout(setTimeout(() => setOsdMessage(''), 2000));
             }, [osdTimeout]);
+
+            // Load Video and Subtitles
+            useEffect(() => {
+                if (!videoRef.current) return;
+                setLoading(true);
+                setCurrentSubtitleText('');
+                
+                // Process auto-matched subtitle if present
+                if (channel.pendingSubFile) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        let content = evt.target.result;
+                        if (channel.pendingSubFile.name.toLowerCase().endsWith('.srt')) {
+                            content = srtToVtt(content);
+                        }
+                        const blob = new Blob([content], { type: 'text/vtt' });
+                        setSubtitleUrl(URL.createObjectURL(blob));
+                        showOSD('Auto-loaded Subtitle');
+                    };
+                    reader.readAsText(channel.pendingSubFile);
+                } else {
+                    setSubtitleUrl(null);
+                }
+
+                // Explicitly removed the `.load()` method call to prevent interrupting 
+                // Chromium's asynchronous internal demuxer initialization for complex containers like MKV.
+                videoRef.current.src = channel.url;
+                videoRef.current.play().catch(e => {
+                    console.warn('Autoplay prevented or unsupported media', e);
+                    setLoading(false);
+                });
+            }, [channel, showOSD]);
 
             // --- LUME KEYBOARD ENGINE & SUBTITLE NAVIGATION ---
             useEffect(() => {
@@ -698,13 +719,16 @@
                 const onTimeUpdate = () => {
                     setCurrentTime(video.currentTime);
                     
-                    // Subtitle extraction
+                    // Subtitle extraction logic mapping to our custom renderer overlay
                     let activeTrack = null;
                     if (video.textTracks) {
                         for (let i = 0; i < video.textTracks.length; i++) {
-                            if (video.textTracks[i].mode === 'hidden' || video.textTracks[i].mode === 'showing') {
+                            // Suppress browser native subtitles but keep cues active for processing
+                            if (video.textTracks[i].mode === 'showing') {
+                                video.textTracks[i].mode = 'hidden';
+                            }
+                            if (video.textTracks[i].mode === 'hidden') {
                                 activeTrack = video.textTracks[i];
-                                if (video.textTracks[i].mode === 'showing') video.textTracks[i].mode = 'hidden';
                                 break;
                             }
                         }
@@ -722,14 +746,14 @@
 
                 const updateStats = () => {
                     if (videoRef.current && videoRef.current.videoHeight) {
-                        setStats({ res: `${videoRef.current.videoHeight}p`, fps: '' }); // FPS natively unsupported easily
+                        setStats({ res: `${videoRef.current.videoHeight}p`, fps: '' }); 
                     }
                 };
 
                 const onLoadedMetadata = () => {
                     setDuration(video.duration);
                     updateStats();
-                    setLoading(false); // Dismiss loading as soon as metadata is parsed
+                    setLoading(false); // Dismiss loading overlay so video isn't blocked behind it
                 };
 
                 const onCanPlay = () => setLoading(false);
@@ -795,21 +819,8 @@
                 reader.onload = (evt) => {
                     let content = evt.target.result;
                     if (file.name.toLowerCase().endsWith('.srt')) content = srtToVtt(content);
-                    
                     const blob = new Blob([content], { type: 'text/vtt' });
-                    const url = URL.createObjectURL(blob);
-                    
-                    const track = document.createElement('track');
-                    track.kind = 'subtitles';
-                    track.label = file.name;
-                    track.srclang = 'en';
-                    track.src = url;
-                    track.default = true;
-                    videoRef.current.appendChild(track);
-                    
-                    if (videoRef.current.textTracks.length > 0) {
-                        videoRef.current.textTracks[videoRef.current.textTracks.length - 1].mode = 'hidden';
-                    }
+                    setSubtitleUrl(URL.createObjectURL(blob));
                     showOSD('Subtitle Loaded');
                 };
                 reader.readAsText(file);
@@ -872,7 +883,9 @@
                     <div className="flex-1 w-full h-full flex items-center justify-center overflow-hidden">
                         <div style={cropStyle}>
                             <div style={arStyle}>
-                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} preload="auto" playsInline onClick={togglePlay} />
+                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} preload="auto" playsInline onClick={togglePlay}>
+                                    {subtitleUrl && <track kind="subtitles" label="Local Subs" src={subtitleUrl} default />}
+                                </video>
                             </div>
                         </div>
                     </div>
@@ -896,7 +909,7 @@
                             <h2 className="text-3xl font-light text-white tracking-tight drop-shadow-md truncate max-w-4xl">{channel.name}</h2>
                         </div>
                         {stats.res && (
-                            <div className="flex items-center space-x-3 text-white/90 bg-white/10 px-4 py-2.5 rounded-xl border border-white/10 font-bold tracking-wider">
+                            <div className="flex items-center space-x-3 text-white/90 bg-white/10 px-4 py-2.5 rounded-xl border border-white/10 font-bold tracking-wider shadow-lg">
                                 <span>{stats.res}</span>
                                 {stats.fps && <span className="font-light opacity-70">| {stats.fps}</span>}
                             </div>
@@ -991,20 +1004,38 @@
             const folderInputRef = useRef(null);
 
             const handleLocalFilesChange = (e) => {
-                const files = Array.from(e.target.files).filter(f => {
+                const files = Array.from(e.target.files);
+                
+                // Segregate media from subtitles
+                const mediaFiles = files.filter(f => {
                     const nameLower = f.name.toLowerCase();
                     return f.type.startsWith('video/') || nameLower.endsWith('.mkv') || nameLower.endsWith('.mp4') || nameLower.endsWith('.webm');
                 });
                 
-                if (files.length === 0) return;
+                const subFiles = files.filter(f => {
+                    const nameLower = f.name.toLowerCase();
+                    return nameLower.endsWith('.srt') || nameLower.endsWith('.vtt');
+                });
+                
+                if (mediaFiles.length === 0) return;
 
-                const newMedia = files.map(f => ({
-                    id: genId(),
-                    name: f.name,
-                    url: URL.createObjectURL(f), 
-                    group: 'Local Media',
-                    isLocal: true
-                }));
+                const newMedia = mediaFiles.map(f => {
+                    // Match exact basename between video and sub files
+                    const baseName = f.name.substring(0, f.name.lastIndexOf('.')) || f.name;
+                    const matchedSub = subFiles.find(sub => {
+                        const subBaseName = sub.name.substring(0, sub.name.lastIndexOf('.')) || sub.name;
+                        return subBaseName === baseName;
+                    });
+
+                    return {
+                        id: genId(),
+                        name: f.name,
+                        url: URL.createObjectURL(f), 
+                        group: 'Local Media',
+                        isLocal: true,
+                        pendingSubFile: matchedSub || null
+                    };
+                });
                 
                 setLocalMedia(prev => [...prev, ...newMedia]);
                 
@@ -1264,8 +1295,8 @@
                 <div className="w-full h-full relative">
                     <StatusBar title={currentCategory.title} />
 
-                    <input type="file" ref={fileInputRef} className="hidden" accept="video/*,.mkv,.m3u8" multiple onChange={handleLocalFilesChange} />
-                    <input type="file" ref={folderInputRef} className="hidden" accept="video/*,.mkv,.m3u8" webkitdirectory="true" directory="true" multiple onChange={handleLocalFilesChange} />
+                    <input type="file" ref={fileInputRef} className="hidden" accept="video/*,.mkv,.m3u8,.srt,.vtt" multiple onChange={handleLocalFilesChange} />
+                    <input type="file" ref={folderInputRef} className="hidden" accept="video/*,.mkv,.m3u8,.srt,.vtt" webkitdirectory="true" directory="true" multiple onChange={handleLocalFilesChange} />
 
                     <div className="xmb-container">
                         <div className="main-menu" style={{ transform: `translateX(${catIdx * -90}px)` }}>
