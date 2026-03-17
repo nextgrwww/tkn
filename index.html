@@ -27,10 +27,14 @@
             --item-spacing: 65px;
         }
 
+        html {
+            background-color: #000; /* Absolute base fallback */
+        }
+
         body {
             margin: 0;
             padding: 0;
-            background: var(--ra-blue-dark);
+            background-color: transparent; /* Lets the bg-animation show through */
             color: var(--text-color);
             font-family: 'Roboto', sans-serif;
             font-weight: 300;
@@ -47,7 +51,7 @@
             left: 0;
             width: 100vw;
             height: 100vh;
-            z-index: -2;
+            z-index: -1;
             overflow: hidden;
             background: radial-gradient(120% 120% at 50% 0%, var(--ra-blue-light) 0%, var(--ra-blue-dark) 100%);
         }
@@ -520,8 +524,12 @@
             // Load Video
             useEffect(() => {
                 if (!videoRef.current) return;
+                setLoading(true);
                 videoRef.current.src = channel.url;
-                videoRef.current.play().catch(e => console.warn('Autoplay prevented', e));
+                videoRef.current.play().catch(e => {
+                    console.warn('Autoplay prevented or unsupported media', e);
+                    setLoading(false);
+                });
             }, [channel]);
 
             // Show OSD Message
@@ -571,7 +579,7 @@
                             toggleFullscreen();
                             break;
                         case 't':
-                            e.preventDefault(); // Theater mode mapping -> just fullscreen here
+                            e.preventDefault(); 
                             toggleFullscreen(); 
                             break;
                         case 'z':
@@ -634,7 +642,7 @@
 
                 window.addEventListener('keydown', handleKey);
                 return () => window.removeEventListener('keydown', handleKey);
-            }, [onBack, customZoom, osdTimeout]); // Re-bind safely
+            }, [onBack, customZoom, osdTimeout]); 
 
             // Video Event Listeners
             useEffect(() => {
@@ -666,21 +674,38 @@
                     setCurrentSubtitleText(newText);
                 };
 
-                const onLoadedData = () => {
-                    setLoading(false);
+                const onLoadedMetadata = () => {
                     setDuration(video.duration);
+                    setLoading(false); // Dismiss loading as soon as metadata is parsed
+                };
+
+                const onCanPlay = () => setLoading(false);
+
+                const onPlaying = () => {
+                    setIsPlaying(true); 
+                    setLoading(false);
+                    showOSD('Play'); 
+                };
+
+                const onPause = () => {
+                    setIsPlaying(false);
+                    showOSD('Pause');
                 };
                 
                 video.addEventListener('timeupdate', onTimeUpdate);
-                video.addEventListener('loadeddata', onLoadedData);
-                video.addEventListener('play', () => { setIsPlaying(true); showOSD('Play'); });
-                video.addEventListener('pause', () => { setIsPlaying(false); showOSD('Pause'); });
+                video.addEventListener('loadedmetadata', onLoadedMetadata);
+                video.addEventListener('canplay', onCanPlay);
+                video.addEventListener('playing', onPlaying);
+                video.addEventListener('pause', onPause);
 
                 return () => {
                     video.removeEventListener('timeupdate', onTimeUpdate);
-                    video.removeEventListener('loadeddata', onLoadedData);
+                    video.removeEventListener('loadedmetadata', onLoadedMetadata);
+                    video.removeEventListener('canplay', onCanPlay);
+                    video.removeEventListener('playing', onPlaying);
+                    video.removeEventListener('pause', onPause);
                 };
-            }, []);
+            }, [showOSD]);
 
             // Controls Handlers
             const togglePlay = () => { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); };
@@ -754,6 +779,7 @@
                 
                 if (ar === 'Default') {
                     arStyle.width = '100%'; arStyle.height = '100%';
+                    arStyle.minWidth = '0'; arStyle.minHeight = '0'; // Fixes flexbox collapsing video height
                     videoObjFit = crop === 'Default' ? 'contain' : 'cover';
                 } else {
                     const [aw, ah] = ar.split(':');
@@ -772,10 +798,9 @@
                 if (customZoom !== null) {
                     scale = customZoom;
                 } else if (zoomMode === 'Fill Screen') {
-                    // Safe approximation for CSS
-                    scale = 1.35; // Standard Netflix fill approximation
+                    scale = 1.35; 
                 } else if (zoomMode === 'Original Size') {
-                    scale = 1; // Simplified for React without direct video dimensions access easily
+                    scale = 1; 
                 }
                 cropStyle.transform = `scale(${scale})`;
 
@@ -792,7 +817,7 @@
                     <div className="flex-1 w-full h-full flex items-center justify-center overflow-hidden">
                         <div style={cropStyle}>
                             <div style={arStyle}>
-                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} playsInline onClick={togglePlay} />
+                                <video ref={videoRef} className="w-full h-full" style={{ objectFit: videoObjFit }} preload="auto" playsInline onClick={togglePlay} />
                             </div>
                         </div>
                     </div>
@@ -807,11 +832,12 @@
                         {osdMessage}
                     </div>
 
-                    {/* Netflix-Style OSD Top Bar */}
-                    <div className={`absolute top-0 left-0 w-full p-8 bg-gradient-to-b from-black/80 to-transparent flex items-center transition-opacity duration-500 z-50 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
-                        <button onClick={onBack} className="text-white hover:scale-110 transition-transform p-2 mr-4">
+                    {/* Netflix-Style OSD Top Bar with Title */}
+                    <div className={`absolute top-0 left-0 w-full px-8 py-6 bg-gradient-to-b from-black/90 to-transparent flex items-center transition-opacity duration-500 z-50 ${controlsVisible ? 'opacity-100' : 'opacity-0'}`}>
+                        <button onClick={onBack} className="text-white hover:scale-110 transition-transform p-2 mr-6">
                             <span className="w-8 h-8 block">{ICONS.arrowLeft}</span>
                         </button>
+                        <h2 className="text-3xl font-light text-white tracking-tight drop-shadow-md truncate">{channel.name}</h2>
                     </div>
 
                     {/* Netflix-Style OSD Bottom Bar */}
@@ -844,10 +870,6 @@
                                     </div>
                                 </div>
                                 <span className="font-semibold text-sm opacity-90 tracking-wide ml-2">{formatTime(currentTime)} <span className="opacity-50 mx-1">/</span> {formatTime(duration)}</span>
-                            </div>
-
-                            <div className="text-xl font-bold tracking-wider text-center flex-1 mx-4 truncate drop-shadow-lg">
-                                {channel.name}
                             </div>
 
                             <div className="flex items-center gap-6">
